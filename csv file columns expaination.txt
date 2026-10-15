@@ -1,0 +1,20 @@
+Column	What it holds
+company_number	The Companies House number, padded to 8 digits for English ones
+status	ok, no_figures_found, no_accounts_filed or company_not_found
+route	How it was read: ixbrl, zip-ixbrl or pdf. Blank means nothing was read
+accounts_type	The filing type from Companies House, e.g. group, full, total-exemption-full
+filing_date	When the accounts were filed at Companies House, not the year end
+turnover	The filed turnover in pounds. Blank means it was not on the public record
+turnover_source	filed, not filed, or estimated from trade debtors
+turnover_estimate	Debtors times 5, only populated when turnover is blank
+turnover_estimate_confidence	medium if based on trade debtors, low if it had to use total debtors
+turnover_estimate_basis	The working, e.g. trade debtors 312,365 x 5 = 1,561,825
+observed_debtor_multiple	The real turnover to debtors ratio, only where both were filed and the pair looks sane
+debtors	Total debtors from the balance sheet, including director loans and intercompany
+trade_debtors	Just the trade element, the bit that came from selling something
+employee_size	Average number of employees during the year
+turnover_on_record	False means the company filed filleted accounts, so turnover legally is not there
+pages_ocred	How many pages needed OCR. Blank or 0 means the free iXBRL route was used
+secs	Wall time for that company
+
+The two to sort on when checking a batch: turnover_source tells you whether a number is real or inferred, and observed_debtor_multiple being blank on a row where both turnover and debtors are populated means the pair failed the sanity check and one of them is misread.

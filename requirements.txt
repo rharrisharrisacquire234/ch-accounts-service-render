@@ -1,0 +1,11 @@
+# Core service. Works as is with OCR_ENGINE=tesseract, and also with
+# OCR_ENGINE=unlimited when the model runs behind vLLM or SGLang somewhere
+# else, because that route is just httpx over the OpenAI chat API.
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pymupdf>=1.25
+pytesseract>=0.3.13
+pillow>=11.0
+httpx>=0.28
+lxml>=5.3
+pydantic>=2.10

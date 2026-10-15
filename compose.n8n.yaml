@@ -1,0 +1,17 @@
+# Use this when n8n runs in Docker on the same VPS. It puts the extractor on
+# n8n's Docker network, so n8n reaches it at http://ch_accounts:8080 and the
+# port never needs to be open to the internet.
+#
+#   docker network ls                       # find n8n's network name
+#   echo "N8N_NETWORK=<that name>" >> .env
+#   docker compose -f compose.yaml -f compose.n8n.yaml up -d --build
+services:
+  ocr:
+    networks:
+      - default
+      - n8n
+
+networks:
+  n8n:
+    external: true
+    name: "${N8N_NETWORK:?set N8N_NETWORK in .env to n8n's docker network name}"

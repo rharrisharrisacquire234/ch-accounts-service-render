@@ -1,0 +1,76 @@
+services:
+  ocr:
+    build: .
+    container_name: ch_accounts
+    restart: unless-stopped
+    ports:
+      # 127.0.0.1 = only reachable from the VPS itself (n8n on the same box,
+      # or a reverse proxy in front). Set BIND=0.0.0.0 in .env only if n8n
+      # runs somewhere else AND the firewall limits who can reach port 8080.
+      - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
+    volumes:
+      - financials_cache:/data
+    environment:
+      # Both of these must be set. Without CH_API_KEY the company endpoint
+      # cannot work, and without API_TOKEN the endpoints are wide open.
+      CH_API_KEY: "${CH_API_KEY:?set CH_API_KEY in a .env file}"
+      API_TOKEN: "${API_TOKEN:?set API_TOKEN in a .env file}"
+
+      # A Hostinger VPS has no GPU, so Tesseract is the engine. It is free and
+      # runs on the CPU. Most recent filings are iXBRL and need no OCR at all.
+      OCR_ENGINE: "${OCR_ENGINE:-tesseract}"
+      SCOUT_ENGINE: "${SCOUT_ENGINE:-tesseract}"
+      UNLIMITED_URL: "${UNLIMITED_URL:-http://unlimited_ocr:8000}"
+      UNLIMITED_SERVER: "${UNLIMITED_SERVER:-vllm}"
+      UNLIMITED_IMAGE_MODE: "gundam"
+      UNLIMITED_WORKERS: "4"
+
+      READ_DPI: "${READ_DPI:-200}"
+      SCOUT_DPI: "150"
+      OCR_PSM: "6"
+      # Tesseract threads per filing. Match the VPS vCPU count.
+      OCR_WORKERS: "${OCR_WORKERS:-2}"
+      MAX_OCR_PAGES: "${MAX_OCR_PAGES:-45}"
+      # Filings read at the same time. 1 on a 2 to 4 vCPU plan.
+      MAX_JOBS: "${MAX_JOBS:-1}"
+      # How long a company's figures are reused before the filing is read again.
+      CACHE_DAYS: "${CACHE_DAYS:-30}"
+      CACHE_DIR: "/data"
+    deploy:
+      resources:
+        limits:
+          # Must not exceed the VPS core count or the container will not start.
+          cpus: "${OCR_CPUS:-2}"
+          memory: "${OCR_MEMORY:-3G}"
+
+  # Only starts with --profile gpu, so the CPU only setup is unaffected.
+  #   docker compose --profile gpu up -d --build
+  # Needs an NVIDIA GPU and the container toolkit on the host.
+  unlimited_ocr:
+    profiles: ["gpu"]
+    image: vllm/vllm-openai:unlimited-ocr
+    container_name: unlimited_ocr
+    restart: unless-stopped
+    ports:
+      - "10000:8000"
+    ipc: host
+    volumes:
+      # Cache the weights so a restart is seconds rather than a redownload.
+      - huggingface:/root/.cache/huggingface
+    command: >
+      --model baidu/Unlimited-OCR
+      --served-model-name Unlimited-OCR
+      --trust-remote-code
+      --max-model-len 32768
+      --gpu-memory-utilization 0.85
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  huggingface:
+  financials_cache:

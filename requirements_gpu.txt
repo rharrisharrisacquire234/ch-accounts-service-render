@@ -1,0 +1,43 @@
+# Only needed for UNLIMITED_MODE=local, which loads baidu/Unlimited-OCR into
+# this process. If you are running the model behind vLLM or SGLang instead,
+# which is the route to prefer, you need none of this.
+#
+# Install into a virtual environment, never into your system python.
+#
+#   python -m venv .venv
+#   .\.venv\Scripts\Activate.ps1
+#   pip install -r requirements.txt
+#   pip install -r requirements_gpu.txt
+#
+# Then torch, separately, because the index url is what decides whether the
+# GPU gets used at all. `pip install torch` on Windows gives the CPU build:
+#
+#   NVIDIA card:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu129
+#   no GPU:       pip install torch torchvision
+#
+# If pip stops with "WinError 206: The filename or extension is too long",
+# that is Windows refusing paths over 260 characters, and torch ships some
+# very deeply nested licence files. Either enable long paths once, in an
+# admin PowerShell:
+#
+#   New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+#     -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+#
+# or put the venv somewhere short, such as C:\ocrenv, rather than under a
+# long project path.
+#
+# transformers is pinned below 5. The model ships its own modeling code and
+# loads it with trust_remote_code, and that code was written against the 4.x
+# API. transformers 5 will import and then fail somewhere less obvious.
+transformers>=4.57,<5
+tokenizers>=0.22,<0.23
+accelerate>=1.0
+einops>=0.8
+addict>=2.4
+easydict>=1.13
+psutil>=6.0
+
+# The model's own modeling file imports these directly, so the load fails
+# without them even though nothing here uses them.
+matplotlib>=3.8
+requests>=2.31
