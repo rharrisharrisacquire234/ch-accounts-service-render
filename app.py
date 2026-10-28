@@ -115,12 +115,17 @@ def summary(rec: Dict[str, Any]) -> Dict[str, Any]:
         "turnover_estimate": rec.get("turnover_estimate"),
         "turnover_estimate_basis": rec.get("turnover_estimate_basis"),
         "turnover_estimate_confidence": rec.get("turnover_estimate_confidence"),
+        "observed_debtor_multiple": rec.get("observed_debtor_multiple"),
+        "debtors": rec.get("debtors"),
+        "trade_debtors": rec.get("trade_debtors"),
         "employee_size": rec.get("employee_size"),
         "net_assets": rec.get("net_assets"),
         "total_assets": rec.get("total_assets"),
         "total_liabilities": rec.get("total_liabilities"),
         "total_assets_working": rec.get("total_assets_working"),
         "total_liabilities_working": rec.get("total_liabilities_working"),
+        "balance_check": rec.get("balance_check"),
+        "balance_check_detail": rec.get("balance_check_detail"),
         "pages_ocred": rec.get("pages_ocred") or 0,
     }
 
