@@ -463,6 +463,199 @@ def test_sample_filing():
     return passed, len(EXPECTED) + 6
 
 
+def _ocr_page(index, lines, text_extra=""):
+    """A page built the way layout.page_rows builds one, from (word, x)
+    pairs, so the coordinates taken from real Tesseract output carry over."""
+    from layout import Cell, Row, Word
+    rows = []
+    for top, line in enumerate(lines):
+        words = [Word(x, t) for t, x in line]
+        cells = [Cell(w.x, figures.repair(w.text), to_number(w.text))
+                 for w in words if is_money_cell(w.text)
+                 and to_number(w.text) is not None]
+        rows.append(Row(words, cells, top * 40))
+    text = "\n".join(r.text for r in rows) + text_extra
+    return {"index": index, "rows": rows, "text": text}
+
+
+def test_note_column_and_sections():
+    """Coordinates from real Tesseract output on the samples folder.
+
+    The note column sits left of the current year, inside its bounds, and a
+    one digit note reference was being taken as the figure. Debtors split
+    into after and within one year were reported as the first line alone.
+    A Current assets heading took its first item as the section total."""
+    years = [("2025", 1188), ("2024", 1398)]
+    pl = _ocr_page(12, [
+        [("Profit", 443), ("and", 515), ("Loss", 581), ("Account", 677)],
+        years, [("Note", 969), ("£000", 1204), ("£000", 1417)],
+        [("Turnover", 282), ("3", 972), ("5", 1205), ("-", 1418)],
+    ])
+    dormant = _ocr_page(1, [
+        [("Balance", 620), ("Sheet", 721)],
+        [("2025", 1184), ("2024", 1397)],
+        [("Note", 969), ("£", 1204), ("£", 1417)],
+        [("Current", 269), ("assets", 355)],
+        [("Debtors", 265), ("2", 968), ("3", 1203), ("3", 1416)],
+        [("Net", 242), ("assets", 302), ("3", 1203), ("3", 1416)],
+    ])
+    wrapped_nil = _ocr_page(11, [
+        [("Statement", 300), ("of", 400), ("financial", 480), ("position", 580)],
+        [("2025", 1066), ("2024", 1371)],
+        [("Debtors:", 270), ("amounts", 370), ("falling", 460), ("due", 520),
+         ("within", 580), ("one", 640)],
+        [("year", 260), ("1", 960), ("-", 1066), ("1,077", 1226)],
+    ])
+    split = _ocr_page(12, [
+        [("Balance", 620), ("Sheet", 721)],
+        [("2025", 881), ("2024", 1039)],
+        [("Current", 269), ("assets", 355)],
+        [("Stocks", 260), ("14", 760), ("3,365", 881), ("2,044", 1039)],
+        [("Debtors:", 276), ("amounts", 374), ("falling", 461), ("due", 521),
+         ("after", 580), ("one", 641), ("year", 691), ("15", 760),
+         ("121", 889), ("81", 1045)],
+        [("Debtors:", 276), ("amounts", 374), ("falling", 461), ("due", 521),
+         ("within", 580), ("one", 641), ("year", 691), ("16", 760),
+         ("4,594", 881), ("4,315", 1038)],
+        [("8,080", 881), ("6,440", 1039)],
+        [("Creditors:", 290), ("amounts", 401), ("17", 760),
+         ("(16,270)", 877), ("(11,099)", 1030)],
+    ])
+    passed = 0
+    passed += check("note 3 is not turnover, 5 (thousand) is",
+                    fields.find_turnover([pl])["value"], 5000.0)
+    passed += check("note 2 is not debtors, 3 is",
+                    fields.find_debtors([dormant])["value"], 3.0)
+    passed += check("wrapped debtors line, nil is not note 1",
+                    fields.find_debtors([wrapped_nil])["value"], 0.0)
+    passed += check("debtors after + within one year summed",
+                    fields.find_debtors([split])["value"], 4715.0)
+    passed += check("current assets is the section total",
+                    fields._section_total([split],
+                                          fields.CURRENT_ASSETS_LABEL)["value"],
+                    8080.0)
+    passed += check("single item section is its own total",
+                    fields.find_total_assets([dormant])["value"], 3.0)
+    return passed, 6
+
+
+def test_prose_and_other_pages():
+    """Net assets read from a sentence, and total assets from the parent's
+    group accounts bound in behind the subsidiary's own balance sheet."""
+    prose = _ocr_page(1, [
+        [(w, 100 + 40 * i) for i, w in enumerate(
+            "net assets was due to the profit for the year of 42 million "
+            "and actuarial gains, net of tax, of 19 million partly".split())],
+        [("offset", 100), ("by", 160), ("a", 200), ("dividend", 260),
+         ("paid", 330), ("of", 380), ("250", 420), ("million.", 480)],
+    ])
+    own = _ocr_page(11, [
+        [("Statement", 300), ("of", 400), ("financial", 480), ("position", 580)],
+        [("2025", 1066), ("2024", 1371)],
+        [("Fixed", 260), ("assets", 330)],
+        [("Investments", 280), ("9", 960), ("10,000", 1066), ("48,221", 1371)],
+        [("Current", 269), ("assets", 355)],
+        [("Debtors", 265), ("1", 960), ("-", 1066), ("1,077", 1371)],
+        [("Net", 250), ("assets", 310), ("10,000", 1066), ("10,000", 1374)],
+    ])
+    parent = _ocr_page(173, [
+        [("Balance", 620), ("sheet", 721)],
+        [("2025", 919), ("2024", 1007)],
+        [("Total", 260), ("assets", 330), ("120,685", 919), ("11,361", 1007)],
+    ])
+    pages = [own, parent]
+    net = fields.find_net_assets(pages)
+    assets = fields.find_total_assets(pages, net)
+    passed = 0
+    passed += check("prose sentence is not net assets",
+                    fields.find_net_assets([prose]), None)
+    passed += check("net assets from the company's own page",
+                    net["value"], 10000.0)
+    passed += check("total assets from the same page as net assets",
+                    assets["value"], 10000.0)
+    passed += check("total liabilities from the same page",
+                    fields.find_total_liabilities(pages, assets, net)["value"],
+                    0.0)
+    return passed, 4
+
+
+def test_balance_check():
+    """The balance sheet has to add up, and a misread line makes it not.
+
+    Coordinates from a real balance sheet laid out with an items column and
+    a totals column per year, where the 2025 heading sits over the totals
+    and last year's items column falls inside this year's bounds."""
+    import checks
+    lines = [
+        [("Balance", 620), ("Sheet", 721)],
+        [("2025", 1152), ("2024", 1497)],
+        [("Note", 796), ("£", 1173), ("£", 1519)],
+        [("Fixed", 260), ("assets", 330)],
+        [("Tangible", 280), ("fixed", 360), ("assets", 420), ("4", 802),
+         ("13,559,565", 1112), ("10,499,802", 1457)],
+        [("Current", 269), ("assets", 355)],
+        [("Stocks", 260), ("5", 802), ("99,756", 963), ("-", 1291)],
+        [("Debtors:", 276), ("amounts", 374), ("falling", 461), ("due", 521),
+         ("within", 580), ("one", 641), ("year", 691), ("6", 802),
+         ("1,095,020", 946), ("2,454,725", 1291)],
+        [("Cash", 260), ("at", 300), ("bank", 340), ("7", 802),
+         ("6,441,162", 945), ("-", 1291)],
+        [("7,635,938", 946), ("2,454,725", 1291)],
+        [("Creditors:", 290), ("amounts", 401), ("falling", 488), ("due", 548),
+         ("within", 608), ("one", 668)],
+        [("year", 260), ("8", 802), ("(5,814,001)", 945), ("(9,061,214)", 1291)],
+        [("Net", 251), ("current", 320), ("assets", 400),
+         ("1,821,937", 1119), ("(6,606,489)", 1464)],
+        [("Total", 260), ("assets", 330), ("less", 389), ("current", 459),
+         ("liabilities", 560), ("15,381,502", 1111), ("3,893,313", 1464)],
+        [("Creditors:", 290), ("amounts", 401), ("falling", 488), ("due", 548),
+         ("after", 608), ("more", 668)],
+        [("than", 260), ("one", 300), ("year", 340), ("9", 802),
+         ("(2,278,389)", 1118), ("(2,176,684)", 1464)],
+        [("Provisions", 283), ("for", 376), ("liabilities", 458)],
+        [("Deferred", 266), ("tax", 343), ("10", 802), ("-", 981),
+         ("(1,025,711)", 1291)],
+        [("Net", 236), ("assets", 306), ("13,103,113", 1111), ("690,918", 1475)],
+        [("Capital", 260), ("and", 330), ("reserves", 400)],
+        [("Called", 257), ("up", 312), ("share", 361), ("capital", 431),
+         ("31,200,002", 1111), ("15,000,002", 1458)],
+        [("Profit", 253), ("and", 309), ("loss", 357), ("account", 426),
+         ("(18,096,889)", 1111), ("(14,309,084)", 1457)],
+        [("13,103,113", 1111), ("690,918", 1475)],
+    ]
+    page = _ocr_page(1, lines)
+    from layout import current_year_column, pick_current, year_columns
+    column = current_year_column(year_columns(page["rows"]))
+    deferred = page["rows"][17]
+    passed = 0
+    passed += check("nil this year beats last year's items column",
+                    pick_current(deferred, column).value, 0.0)
+
+    def run(p):
+        found = {"net_assets": fields.find_net_assets([p]),
+                 "debtors": fields.find_debtors([p])}
+        found["total_assets"] = fields.find_total_assets([p], found["net_assets"])
+        return checks.balance_sheet([p], found)
+
+    good = run(page)
+    passed += check("a balance sheet that adds up passes", good["status"],
+                    "pass")
+    # one fixed asset item, so there is no fixed asset sum to check
+    passed += check("  and every identity was tried", good["run"], 7)
+
+    # Tesseract reading 1,095,020 as 1,095,620: one digit, silent.
+    lines[7][8] = ("1,095,620", 946)
+    bad = run(_ocr_page(1, lines))
+    passed += check("one misread digit fails the check", bad["status"], "fail")
+    passed += check("  and says which line", "current asset items add up"
+                    in bad["summary"], True)
+
+    none = checks.balance_sheet([], {"net_assets": None})
+    passed += check("nothing to check from is not a pass", none["status"],
+                    "not checked")
+    return passed, 6
+
+
 def test_balance_sheet_markdown():
     """Net assets, total assets and total liabilities from a balance sheet.
 
@@ -606,6 +799,10 @@ def main():
         ("balance sheet from markdown", test_balance_sheet_markdown),
         ("balance sheet from ixbrl", test_balance_sheet_ixbrl),
         ("holding company ixbrl", test_holding_company_ixbrl),
+        ("note column and balance sheet sections",
+         test_note_column_and_sections),
+        ("prose and other pages", test_prose_and_other_pages),
+        ("balance sheet adds up", test_balance_check),
         ("sample filing end to end", test_sample_filing),
     ]:
         print(f"\n{name}")
