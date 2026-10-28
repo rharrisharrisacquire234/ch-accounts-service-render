@@ -163,6 +163,9 @@ def year_columns(rows: List[Row]) -> Dict[int, int]:
 
 Column = Tuple[int, int, Tuple[float, float]]
 
+# How a nil figure is printed, once repair() has normalised the dashes.
+NIL = ("-", "—", "–", "nil", "none")
+
 
 def current_year_column(years: Dict[int, int]) -> Optional[Column]:
     """Return (year, x centre, (lower, upper)) for the most recent year.
@@ -195,10 +198,56 @@ def pick_current(row: Row, column: Optional[Column]) -> Optional[Cell]:
     Falls back to the leftmost figure when no year heading was found, which
     is the right default: accounts always present the current year first.
     """
-    if not row.cells:
-        return None
     if column is None:
-        return row.cells[0]
-    _, _, (lower, upper) = column
+        return row.cells[0] if row.cells else None
+
+    _, x, (lower, upper) = column
+
+    # Statements with an items column and a totals column per year put the
+    # year heading over the totals, so last year's items column can sit
+    # inside this year's bounds. "Deferred tax 10 - (1,025,711)" is nil this
+    # year and 1,025,711 last year, and position alone read it the other
+    # way. When the row holds one entry per year and one is a dash, the
+    # order decides: this year is always presented first.
+    # A dash inside the caption ("Loans - directors") is not a nil figure,
+    # so only dashes after the last word of the caption count.
+    cell_x = {c.x for c in row.cells}
+    caption_end = max((w.x for w in row.words
+                       if any(ch.isalpha() for ch in w.text)
+                       and repair(w.text) not in NIL), default=-1)
+    entries = sorted(
+        [(c.x, c) for c in row.cells] +
+        [(w.x, None) for w in row.words
+         if w.x not in cell_x and w.x > caption_end
+         and repair(w.text) in NIL],
+        key=lambda e: e[0])
+    if len(entries) == 2 and any(c is None for _, c in entries):
+        first_x, first = entries[0]
+        return first if first is not None else Cell(first_x, "0", 0.0)
+
     inside = [c for c in row.cells if lower <= c.x < upper]
-    return inside[0] if inside else row.cells[0]
+    if inside:
+        return inside[0]
+
+    # The current year is usually the leftmost column, so its lower bound
+    # runs all the way to the margin and takes in the Note column. A money
+    # cell can never be a note reference, but a bare word can: on
+    # "Turnover 3 5 -" in thousands the 3 is the note and 5 is the figure,
+    # and on "Debtors 2 3 3" the 2 is the note. So bare words are only
+    # accepted within half a column spacing either side of the heading, and
+    # the one nearest the heading wins rather than the leftmost.
+    near = max(lower, x - (upper - x)) if upper != float("inf") else lower
+
+    # If row.cells didn't have a figure inside the column bounds, check row.words:
+    # 1. Could be a nil/dash symbol representing zero
+    # 2. Could be a 1 or 2 digit number (e.g. on statements in thousands or dormant filings)
+    for word in sorted(row.words, key=lambda w: abs(w.x - x)):
+        if near <= word.x < upper:
+            fixed = repair(word.text)
+            if fixed in NIL:
+                return Cell(word.x, "0", 0.0)
+            val = to_number(word.text)
+            if val is not None:
+                return Cell(word.x, repair(word.text), val)
+
+    return None
