@@ -124,15 +124,19 @@ def scout_order(page_count: int) -> List[int]:
 
     Small filings get read whole. On anything larger, the statements sit
     after the narrative reports, so start around the middle and work out,
-    but always look at the first two pages because that is where a contents
+    but always look at the first few pages because that is where a contents
     page lives.
     """
     if page_count <= SMALL_DOC_PAGES:
         return list(range(page_count))
-    middle = int(page_count * 0.45)
-    order = [0, 1]
+    # A plc annual report is mostly narrative and its statements start
+    # around 45% of the way in. A 30 to 80 page filing has a short
+    # strategic report, and starting at 45% put the balance sheet on page
+    # 12 of 33 behind the page cap, so it was never read at all.
+    middle = int(page_count * (0.25 if page_count <= 80 else 0.45))
+    order = [0, 1, 2, 3, 4]
     order += list(range(middle, page_count))
-    order += list(range(2, middle))
+    order += list(range(5, middle))
     seen, out = set(), []
     for p in order:
         if p not in seen and 0 <= p < page_count:
@@ -246,7 +250,7 @@ def _read(pdf, allow_ocr, page_list, max_ocr, stop_when=None) -> Dict[str, Any]:
                 add(index, rows, f"{scout.name}_scout_{SCOUT_DPI}", markdown)
                 text = pages[index]["text"]
 
-                if not contents_seen and index <= 2:
+                if not contents_seen and index <= 4:
                     extra = contents_targets(text, page_count)
                     if extra:
                         contents_seen = True
