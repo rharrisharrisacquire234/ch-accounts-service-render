@@ -20,6 +20,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import ch_client
+import checks
 import estimate
 import fields
 import ixbrl
@@ -33,7 +34,7 @@ EMPTY_BALANCE = {"net_assets": None, "total_assets": None,
 def extract_from_pages(pages: List[Dict[str, Any]],
                        want_turnover: bool) -> Dict[str, Any]:
     turnover = fields.find_turnover(pages) if want_turnover else None
-    return {
+    found = {
         "turnover": turnover,
         "debtors": fields.find_debtors(pages),
         "trade_debtors": fields.find_trade_debtors(pages),
@@ -41,11 +42,13 @@ def extract_from_pages(pages: List[Dict[str, Any]],
         "intercompany_debtors": fields.find_intercompany_debtors(pages),
         **balance_sheet(pages),
     }
+    found["balance_check"] = checks.balance_sheet(pages, found)
+    return found
 
 
 def balance_sheet(pages: List[Dict[str, Any]]) -> Dict[str, Any]:
     net = fields.find_net_assets(pages)
-    assets = fields.find_total_assets(pages)
+    assets = fields.find_total_assets(pages, net)
     return {
         "net_assets": net,
         "total_assets": assets,
@@ -93,6 +96,13 @@ def add_estimate(record: Dict[str, Any]) -> Dict[str, Any]:
 def _satisfied(found: Dict[str, Any], want_turnover: bool,
                saw_no_pl: bool) -> bool:
     if found["debtors"] is None or found["employees"] is None:
+        return False
+    # Trade debtors sit in the notes after the balance sheet and are what
+    # the turnover estimate is built on. With one OCR worker the reader
+    # checks after every page, and stopping as soon as total debtors were in
+    # hand meant the debtors note was never read at all.
+    if found.get("trade_debtors") is None and not found.get(
+            "intercompany_debtors"):
         return False
     if found.get("net_assets") is None:
         return False
@@ -162,6 +172,12 @@ def _flatten(found: Dict[str, Any]) -> Dict[str, Any]:
     units = [out.get(f"{k}_units") for k in ("turnover", "debtors")
              if out.get(f"{k}_units")]
     out["scale_conflict"] = len(set(units)) > 1
+
+    # pass, fail or not checked. A fail means a line on the balance sheet
+    # page was misread or missed, so the row wants a look before it is used.
+    check = found.get("balance_check") or {}
+    out["balance_check"] = check.get("status", "not checked")
+    out["balance_check_detail"] = check.get("summary")
     return out
 
 
@@ -275,6 +291,9 @@ def company(ch: ch_client.CompaniesHouse, number: str,
                             "balance_sheet_date": parsed["balance_sheet_date"],
                             "debtors_intercompany":
                                 parsed["debtors_intercompany"],
+                            "balance_check": "not checked",
+                            "balance_check_detail":
+                                "iXBRL tagged figures, no OCR to misread",
                             "tagged_facts": parsed["tagged_facts"],
                             "attempts": attempts,
                         })
