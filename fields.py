@@ -67,6 +67,10 @@ EMPLOYEE_LABEL = re.compile(
 # The row that carries the answer when the note is a table rather than a
 # sentence. An unlabelled row of numbers under the categories is the total.
 EMPLOYEE_TOTAL = re.compile(r"^total\b", re.I)
+NO_EMPLOYEES = re.compile(
+    r"\b(?:had\s+no\s+employees|no\s+employees\s+during\s+the\s+year|"
+    r"did\s+not\s+(?:employ|have)\s+any\s+(?:employees|staff)|"
+    r"no\s+persons?\s+(?:were\s+)?employed)\b", re.I)
 # A new numbered note ends the block, so the search does not wander into
 # the next note and pick up a figure from it.
 NOTE_HEADING = re.compile(r"^\d{1,2}[.)]\s")
@@ -120,6 +124,11 @@ def turnover_on_record(atype: str) -> bool:
 
 def _label_matches(row: Row, pattern) -> bool:
     label = row.label.strip(" .:")
+    # A sentence in a note is not a statement line. "Turnover arising from
+    # charge post installation for the year was 6,322,000" on a page in
+    # thousands came back as a turnover of 6.3 billion.
+    if len(label.split()) > MAX_LABEL_WORDS:
+        return False
     return bool(label) and bool(pattern.search(label))
 
 
@@ -136,13 +145,18 @@ def find_turnover(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         rows = page["rows"]
         column = current_year_column(year_columns(rows))
         mult, unit = scale_for(page["text"])
-        for row in rows:
+        for index, row in enumerate(rows):
             if not _label_matches(row, TURNOVER_LABEL):
                 continue
             cell = pick_current(row, column)
-            if cell is None or abs(cell.value) < 100:
+            if cell is None and index + 1 < len(rows) and not row.cells:
+                cell = pick_current(rows[index + 1], column)
+            if cell is None:
                 continue
             value = _scaled(cell.value, mult)
+            # A genuine turnover cannot be pennies unless it is zero
+            if value != 0 and abs(value) < 100:
+                continue
             return {
                 "value": value,
                 "raw": cell.value,
@@ -165,11 +179,13 @@ def find_debtors(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         on_balance_sheet = bool(
             re.search(r"balance\s+sheet|statement\s+of\s+financial\s+position",
                       page["text"], re.I))
-        for row in rows:
+        for index, row in enumerate(rows):
             if not _label_matches(row, DEBTORS_BS_LABEL):
                 continue
             cell = pick_current(row, column)
-            if cell is None or abs(cell.value) < 100:
+            if cell is None and index + 1 < len(rows) and not row.cells:
+                cell = pick_current(rows[index + 1], column)
+            if cell is None:
                 continue
             value = _scaled(cell.value, mult)
             hit = {
@@ -183,10 +199,47 @@ def find_debtors(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
                 "source": "balance sheet" if on_balance_sheet else "notes",
             }
             if on_balance_sheet:
-                return hit
+                return _add_split_debtors(hit, rows, index, column, mult)
             if fallback is None:
                 fallback = hit
     return fallback
+
+
+DEBTORS_SPLIT = re.compile(r"\bdue\s+(after|within)\b", re.I)
+
+
+def _add_split_debtors(hit, rows, index, column, mult):
+    """Debtors shown as two balance sheet lines, due after and due within
+    one year, are one figure. Taking whichever line came first reported a
+    company with 4,715 of debtors as 121, the after one year part alone."""
+    split = DEBTORS_SPLIT.search(hit["label"])
+    if not split:
+        return hit
+    wanted = "within" if split.group(1).lower() == "after" else "after"
+    for other_index in range(max(0, index - 4), min(len(rows), index + 5)):
+        if other_index == index:
+            continue
+        other = rows[other_index]
+        if not _label_matches(other, DEBTORS_BS_LABEL):
+            continue
+        other_split = DEBTORS_SPLIT.search(other.label)
+        if not other_split or other_split.group(1).lower() != wanted:
+            continue
+        cell = pick_current(other, column)
+        if cell is None and other_index + 1 < len(rows) and not other.cells:
+            cell = pick_current(rows[other_index + 1], column)
+        if cell is None:
+            continue
+        extra = _scaled(cell.value, mult)
+        total = hit["value"] + extra
+        return {**hit,
+                "value": total,
+                "raw": hit["raw"] + cell.value,
+                "evidence": f"{hit['evidence']} + {other.text}"[:300],
+                "working": f"debtors due {split.group(1).lower()} one year "
+                           f"{hit['value']:,.0f} + due {wanted} one year "
+                           f"{extra:,.0f} = {total:,.0f}"}
+    return hit
 
 
 def find_employees(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -197,6 +250,13 @@ def find_employees(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     after the label" reads 2024 rather than 32.
     """
     for page in pages:
+        no_emp = NO_EMPLOYEES.search(page["text"])
+        if no_emp:
+            return {
+                "value": 0,
+                "page": page["index"],
+                "evidence": no_emp.group(0)[:160],
+            }
         for match in EMPLOYEE_PROSE.finditer(page["text"]):
             value = _first_headcount(match.group(0))
             if value is not None:
@@ -233,7 +293,9 @@ def _trailing_numbers(row) -> List[tuple]:
         if not digits.isdigit():
             break
         value = int(digits)
-        if not 0 < value <= HEADCOUNT_MAX:
+        # Zero is a real answer: a holding company's staff table reads
+        # "Total 0 0", and rejecting it left employees blank.
+        if not 0 <= value <= HEADCOUNT_MAX:
             break
         out.append((word.x, value))
     return list(reversed(out))
@@ -360,13 +422,17 @@ def find_trade_debtors(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         rows = page["rows"]
         column = current_year_column(year_columns(rows))
         mult, unit = scale_for(page["text"])
-        for row in rows:
+        for index, row in enumerate(rows):
             if not _label_matches(row, TRADE_DEBTORS_LABEL):
                 continue
             cell = pick_current(row, column)
-            if cell is None or abs(cell.value) < 100:
+            if cell is None and index + 1 < len(rows) and not row.cells:
+                cell = pick_current(rows[index + 1], column)
+            if cell is None:
                 continue
             value = _scaled(cell.value, mult)
+            if value != 0 and abs(value) < 100:
+                continue
             return {
                 "value": value,
                 "raw": cell.value,
@@ -403,14 +469,25 @@ EQUITY_LABEL = re.compile(
     r"shareholders?\W{0,2}s?\s+(?:deficit|equity)|equity|total\s+equity)\b", re.I)
 TALCL_LABEL = re.compile(r"^total\s+assets\s+less\s+current\s+liabilit", re.I)
 CREDITORS_WITHIN_LABEL = re.compile(
-    r"^creditors\W{0,3}\s*(?:amounts?\s+)?(?:falling\s+)?due\s+within\s+one\s+year",
+    r"^(?:creditors\W{0,3}\s*)?(?:amounts?\s+)?(?:falling\s+)?due\s+within\s+one\s+year",
     re.I)
+CREDITORS_EXCLUDE = re.compile(r"debt[o0]r|receivab", re.I)
 TOTAL_ASSETS_LABEL = re.compile(r"^total\s+assets\b(?!\s+less)", re.I)
+FIXED_ASSETS_LABEL = re.compile(
+    r"^(?:total\s+)?fixed\s+assets\b|^(?:total\s+)?non[- ]current\s+assets\b", re.I)
+CURRENT_ASSETS_LABEL = re.compile(
+    r"^(?:total\s+)?current\s+assets\b", re.I)
 TOTAL_LIABILITIES_LABEL = re.compile(r"^total\s+liabilities\b", re.I)
 CURRENT_LIABILITIES_LABEL = re.compile(r"^(?:total\s+)?current\s+liabilities\b",
                                        re.I)
 BALANCE_SHEET_PAGE = re.compile(
     r"balance\s+sheet|statement\s+of\s+financial\s+position", re.I)
+
+# A balance sheet caption is a few words. A longer label is a sentence in
+# the strategic report: "net assets was due to the profit for the year of
+# 42 million ... partly / offset by a dividend paid of 250 million" was being
+# read as net assets of 250.
+MAX_LABEL_WORDS = 12
 
 
 def _balance_row(pages: List[Dict[str, Any]], pattern,
@@ -422,22 +499,47 @@ def _balance_row(pages: List[Dict[str, Any]], pattern,
         rows = page["rows"]
         column = current_year_column(year_columns(rows))
         mult, unit = scale_for(page["text"])
-        for row in rows:
+        for index, row in enumerate(rows):
             label = row.label.strip(" .:")
-            if not label or not pattern.search(label):
+            if len(label.split()) > MAX_LABEL_WORDS:
                 continue
-            if exclude is not None and exclude.search(label):
+            next_row = rows[index + 1] if index + 1 < len(rows) else None
+
+            matched = False
+            cell = None
+            ev_label = label
+            evidence = row.text
+
+            if label and pattern.search(label) and (exclude is None or not exclude.search(label)):
+                cell = pick_current(row, column)
+                if cell is not None:
+                    matched = True
+                elif next_row is not None and not row.cells:
+                    cell = pick_current(next_row, column)
+                    if cell is not None:
+                        matched = True
+                        evidence = f"{row.text} / {next_row.text}"
+
+            # Check two-line wrapped heading (e.g. "TOTAL ASSETS LESS CURRENT" + "LIABILITIES")
+            if not matched and next_row is not None and not row.cells:
+                combined_label = f"{label} {next_row.label.strip(' .:')}".strip()
+                if combined_label and pattern.search(combined_label) and (exclude is None or not exclude.search(combined_label)):
+                    cell = pick_current(next_row, column)
+                    if cell is not None:
+                        matched = True
+                        ev_label = combined_label
+                        evidence = f"{row.text} / {next_row.text}"
+
+            if not matched or cell is None:
                 continue
-            cell = pick_current(row, column)
-            if cell is None:
-                continue
+
             return {
                 "value": _scaled(cell.value, mult),
                 "raw": cell.value,
                 "units": unit,
                 "page": page["index"],
-                "label": row.label,
-                "evidence": row.text[:160],
+                "label": ev_label,
+                "evidence": evidence[:160],
                 "year": column[0] if column else None,
                 "source": "balance sheet" if BALANCE_SHEET_PAGE.search(
                     page["text"]) else "notes",
@@ -460,32 +562,141 @@ def find_net_assets(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return hit
 
 
-def find_total_assets(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _same_page(pages: List[Dict[str, Any]],
+               anchor: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not anchor or anchor.get("page") is None:
+        return []
+    return [p for p in pages if p["index"] == anchor["page"]]
+
+
+def find_total_assets(pages: List[Dict[str, Any]],
+                      net_assets: Optional[Dict[str, Any]] = None
+                      ) -> Optional[Dict[str, Any]]:
+    """Worked out from the page net assets came from, where possible.
+
+    A subsidiary's filing often carries its parent's group accounts behind
+    it, so the same captions turn up a hundred pages later with the group's
+    figures. Total assets from the parent and net assets from the company
+    gives a total liabilities that belongs to neither.
+    """
+    same = _same_page(pages, net_assets)
+    if same:
+        hit = _total_assets_from(same)
+        if hit is not None:
+            return hit
+    return _total_assets_from(pages)
+
+
+SECTION_END = re.compile(
+    r"^(?:creditors|net\b|total\b|capital\b|provisions?\b|current\s+assets|"
+    r"fixed\s+assets|non[- ]current|equity|shareholders?)", re.I)
+
+
+def _section_total(pages: List[Dict[str, Any]],
+                   pattern) -> Optional[Dict[str, Any]]:
+    """The total of a balance sheet section headed "Fixed assets" or
+    "Current assets".
+
+    The heading usually carries no figure. The previous version then took
+    the row below it, which is the first item in the section, so current
+    assets of stocks, debtors and cash came back as the stocks alone. The
+    section total is the unlabelled row after the items; a section with a
+    single item has no such row, and the item is the total.
+    """
+    ordered = sorted(pages, key=lambda p: 0 if BALANCE_SHEET_PAGE.search(
+        p["text"]) else 1)
+    for page in ordered:
+        rows = page["rows"]
+        column = current_year_column(year_columns(rows))
+        mult, unit = scale_for(page["text"])
+        for index, row in enumerate(rows):
+            label = row.label.strip(" .:")
+            if not label or not pattern.search(label):
+                continue
+            items = []
+            total = None
+            cell = pick_current(row, column)
+            if cell is not None:
+                total = (row, cell)
+            else:
+                for follower in rows[index + 1:index + 12]:
+                    follower_label = re.sub(r"[\d\W_]+", " ",
+                                            follower.label).strip()
+                    if follower_label and SECTION_END.match(follower_label):
+                        break
+                    value = pick_current(follower, column)
+                    if value is None:
+                        continue
+                    if not follower_label:
+                        total = (follower, value)
+                        break
+                    items.append((follower, value))
+                if total is None and len(items) == 1:
+                    total = items[0]
+            if total is None:
+                continue
+            source, cell = total
+            return {
+                "value": _scaled(cell.value, mult),
+                "raw": cell.value,
+                "units": unit,
+                "page": page["index"],
+                "label": label,
+                "evidence": f"{row.text} / {source.text}"[:160]
+                            if source is not row else row.text[:160],
+            }
+    return None
+
+
+def _total_assets_from(pages: List[Dict[str, Any]]
+                       ) -> Optional[Dict[str, Any]]:
     explicit = _balance_row(pages, TOTAL_ASSETS_LABEL)
     if explicit:
         return explicit
     talcl = _balance_row(pages, TALCL_LABEL)
-    within = _balance_row(pages, CREDITORS_WITHIN_LABEL) or \
+    within = _balance_row(pages, CREDITORS_WITHIN_LABEL, exclude=CREDITORS_EXCLUDE) or \
         _balance_row(pages, CURRENT_LIABILITIES_LABEL)
-    if talcl is None or within is None:
-        return None
-    value = talcl["value"] + abs(within["value"])
-    return {
-        "value": value,
-        "page": talcl["page"],
-        "units": talcl["units"],
-        "evidence": (f"{talcl['evidence']} + {within['evidence']}")[:300],
-        "working": f"total assets less current liabilities {talcl['value']:,.0f}"
-                   f" + creditors within one year {abs(within['value']):,.0f}"
-                   f" = {value:,.0f}",
-    }
+    if talcl is not None and within is not None:
+        value = talcl["value"] + abs(within["value"])
+        return {
+            "value": value,
+            "page": talcl["page"],
+            "units": talcl["units"],
+            "evidence": (f"{talcl['evidence']} + {within['evidence']}")[:300],
+            "working": f"total assets less current liabilities {talcl['value']:,.0f}"
+                       f" + creditors within one year {abs(within['value']):,.0f}"
+                       f" = {value:,.0f}",
+        }
+
+    # Balance sheet identity: Fixed Assets + Current Assets
+    current = _section_total(pages, CURRENT_ASSETS_LABEL)
+    fixed = _section_total(pages, FIXED_ASSETS_LABEL)
+    if current is not None:
+        fixed_val = fixed["value"] if fixed is not None else 0.0
+        value = fixed_val + current["value"]
+        ev = f"{fixed['evidence']} + {current['evidence']}" if fixed else current['evidence']
+        working = f"fixed assets {fixed_val:,.0f} + current assets {current['value']:,.0f} = {value:,.0f}" if fixed else f"current assets {current['value']:,.0f} = {value:,.0f}"
+        return {
+            "value": value,
+            "page": current["page"],
+            "units": current["units"],
+            "evidence": ev[:300],
+            "working": working,
+        }
+
+    return None
 
 
 def find_total_liabilities(pages: List[Dict[str, Any]],
                            total_assets: Optional[Dict[str, Any]],
                            net_assets: Optional[Dict[str, Any]]
                            ) -> Optional[Dict[str, Any]]:
-    explicit = _balance_row(pages, TOTAL_LIABILITIES_LABEL)
+    # Same reasoning as total assets: an explicit line on another page may
+    # belong to the parent's group accounts bound in behind the company's.
+    same = _same_page(pages, net_assets)
+    explicit = _balance_row(same or pages, TOTAL_LIABILITIES_LABEL)
+    if explicit is None and same and (total_assets is None or net_assets is None):
+        explicit = _balance_row(pages, TOTAL_LIABILITIES_LABEL)
     if explicit:
         explicit["value"] = abs(explicit["value"])
         return explicit
