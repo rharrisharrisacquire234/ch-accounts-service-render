@@ -68,6 +68,16 @@ def _report(found, no_pl, record=None):
         else:
             print(f"  {label:<13} {'not found':>15}")
 
+    check = found.get("balance_check")
+    if check:
+        print()
+        print(f"  {'balance check':<13} {check['status']:>15}   "
+              f"{check['passed']}/{check['run']} hold")
+        for item in check["checks"]:
+            if not item["ok"]:
+                print(f"  {'':<13} FAIL {item['name']}: "
+                      f"{item['working'][:90]}")
+
     if record and record.get("turnover_estimate") is not None:
         print()
         print(f"  {'estimate':<13} {record['turnover_estimate']:>15,.0f}   "
@@ -384,6 +394,7 @@ def cmd_batch(args):
                 "turnover_estimate_basis", "observed_debtor_multiple",
                 "debtors", "trade_debtors", "employee_size",
                 "net_assets", "total_assets", "total_liabilities",
+                "balance_check", "balance_check_detail",
                 "turnover_on_record", "pages_ocred", "secs"]
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
